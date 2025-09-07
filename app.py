@@ -128,6 +128,10 @@ def webhook_verify():
     return abort(403)
 
 @app.post("/webhook")
+app.logger.info(f"POST /webhook headers={dict(request.headers)}")
+app.logger.info(f"POST /webhook body={request.get_data(as_text=True)}")
+
+
 def webhook_event():
     # Vérifie la signature HMAC
     sig = request.headers.get("X-Strava-Signature")
