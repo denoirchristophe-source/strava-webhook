@@ -155,3 +155,12 @@ def webhook_event():
             return jsonify({"status": "error", "message": str(e)}), 200
 
     return jsonify({"status": "ok"}), 200
+
+@app.get("/last")
+def last_report():
+    try:
+        with open("last_activity_report.md", "r", encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except FileNotFoundError:
+        return "Pas encore de rapport (fais une activité ou édite une description).", 404
+
