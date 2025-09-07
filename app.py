@@ -20,6 +20,20 @@ ACTIVITY_URL = "https://www.strava.com/api/v3/activities/{id}"
 app = Flask(__name__)
 app.logger.setLevel("INFO")
 
+def verify_signature(raw_body: bytes, header_sig: str) -> bool:
+    # --- BYPASS DEV: permet de tester sans signature le temps du debug ---
+    if os.getenv("STRAVA_SKIP_SIGNATURE_CHECK") == "1":
+        app.logger.warning("Skipping signature check (DEV mode).")
+        return True
+    # ---------------------------------------------------------------------
+
+    if not header_sig or not CLIENT_SECRET:
+        return False
+    sig = header_sig.strip()
+    if sig.startswith("sha256="):
+        sig = sig.split("=", 1)[1]
+    digest = hmac.new(CLIENT_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(digest, sig)
 
 # =======================
 # Utilitaires
