@@ -14,6 +14,8 @@ ACTIVITY_URL = "https://www.strava.com/api/v3/activities/{id}"
 
 app = Flask(__name__)
 
+app.logger.setLevel("INFO")
+
 def get_access_token(refresh_token: str) -> str:
     r = requests.post(TOKEN_URL, data={
         "client_id": CLIENT_ID,
@@ -163,4 +165,23 @@ def last_report():
             return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
     except FileNotFoundError:
         return "Pas encore de rapport (fais une activité ou édite une description).", 404
+
+@app.get("/health")
+def health():
+    present = {
+        "STRAVA_CLIENT_ID": bool(os.getenv("STRAVA_CLIENT_ID")),
+        "STRAVA_CLIENT_SECRET": bool(os.getenv("STRAVA_CLIENT_SECRET")),
+        "STRAVA_REFRESH_TOKEN": bool(os.getenv("STRAVA_REFRESH_TOKEN")),
+        "STRAVA_VERIFY_TOKEN": bool(os.getenv("STRAVA_VERIFY_TOKEN")),
+    }
+    return jsonify({"ok": True, "env_present": present}), 200
+
+@app.get("/last")
+def last_report():
+    try:
+        with open("last_activity_report.md", "r", encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except FileNotFoundError:
+        return "Pas encore de rapport (fais une activité ou édite une description).", 404
+
 
