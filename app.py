@@ -13,12 +13,17 @@ CLIENT_SECRET     = os.getenv("STRAVA_CLIENT_SECRET")
 VERIFY_TOKEN      = os.getenv("STRAVA_VERIFY_TOKEN", "verify_me")
 ATHLETE_REFRESH   = os.getenv("STRAVA_REFRESH_TOKEN")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")  # optionnel
+SKIP_SIG_CHECK    = os.getenv("STRAVA_SKIP_SIGNATURE_CHECK") == "1"
 
 TOKEN_URL    = "https://www.strava.com/oauth/token"
 ACTIVITY_URL = "https://www.strava.com/api/v3/activities/{id}"
 
 app = Flask(__name__)
 app.logger.setLevel("INFO")
+
+# Cache mémoire du dernier rapport
+LAST_REPORT = None
+
 
 # =======================
 # Utilitaires
@@ -39,20 +44,17 @@ def get_access_token(refresh_token: str) -> str:
 
 
 def verify_signature(raw_body: bytes, header_sig: str) -> bool:
-    # --- BYPASS DEV: tester sans signature le temps du debug ---
-    if os.getenv("STRAVA_SKIP_SIGNATURE_CHECK") == "1":
+    """Vérifie X-Strava-Signature = HMAC-SHA256(body, CLIENT_SECRET)."""
+    if SKIP_SIG_CHECK:
         app.logger.warning("Skipping signature check (DEV mode).")
         return True
-    # ------------------------------------------------------------
-
     if not header_sig or not CLIENT_SECRET:
         return False
     sig = header_sig.strip()
-    if sig.startswith("sha256="):
+    if sig.startswith("sha256="):  # tolère le préfixe
         sig = sig.split("=", 1)[1]
     digest = hmac.new(CLIENT_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(digest, sig)
-
 
 
 def fmt_pace(sec_per_km: float) -> str:
@@ -145,11 +147,6 @@ def index():
 
 @app.get("/webhook")
 def webhook_verify():
-    """
-    Validation d'abonnement Strava:
-    GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
-    On renvoie {"hub.challenge": "..."} si verify_token correspond.
-    """
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
@@ -165,7 +162,7 @@ def webhook_event():
     app.logger.info(f"POST /webhook headers={dict(request.headers)}")
     app.logger.info(f"POST /webhook body={request.get_data(as_text=True)}")
 
-    # Vérifie la signature HMAC
+    # Signature
     sig = request.headers.get("X-Strava-Signature")
     raw = request.get_data()
     if not verify_signature(raw, sig):
@@ -173,7 +170,7 @@ def webhook_event():
         return abort(401)
 
     event = request.json or {}
-    # {"object_type":"activity","object_id":123,"aspect_type":"create"|"update"}
+    # {"object_type":"activity","object_id":123,"aspect_type":"create"|"update"|"delete"}
     if event.get("object_type") == "activity" and event.get("aspect_type") in ("create", "update"):
         act_id = event.get("object_id")
         try:
@@ -188,15 +185,51 @@ def webhook_event():
             report = analyze_activity(r.json())
             app.logger.info(f"Activity {act_id} processed. Report length={len(report)}")
 
+            # Cache mémoire + best-effort fichier
+            global LAST_REPORT
+            LAST_REPORT = report
+            try:
+                with open("last_activity_report.md", "w", encoding="utf-8") as f:
+                    f.write(report)
+                app.logger.info("last_activity_report.md written.")
+            except Exception as e:
+                app.logger.warning(f"Could not write last_activity_report.md: {e}")
+
             push_slack(f":runner: Nouvelle activité #{act_id}\n{report}")
-            with open("last_activity_report.md", "w", encoding="utf-8") as f:
-                f.write(report)
         except Exception as e:
             app.logger.exception(f"Error while processing activity {act_id}: {e}")
             push_slack(f":warning: Erreur activité {act_id}: {e}")
             return jsonify({"status": "error", "message": str(e)}), 200
 
     return jsonify({"status": "ok"}), 200
+
+
+@app.get("/report/<int:activity_id>")
+def report_activity(activity_id: int):
+    try:
+        access = get_access_token(ATHLETE_REFRESH)
+        r = requests.get(
+            ACTIVITY_URL.format(id=activity_id),
+            headers={"Authorization": f"Bearer {access}"},
+            params={"include_all_efforts": "false"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        a = r.json()
+        report = analyze_activity(a)
+
+        global LAST_REPORT
+        LAST_REPORT = report
+        try:
+            with open("last_activity_report.md", "w", encoding="utf-8") as f:
+                f.write(report)
+        except Exception:
+            pass
+
+        return report, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception as e:
+        app.logger.exception(f"Error generating report for {activity_id}: {e}")
+        return jsonify({"status":"error", "message": str(e)}), 500
 
 
 @app.get("/health")
@@ -206,12 +239,15 @@ def health():
         "STRAVA_CLIENT_SECRET": bool(CLIENT_SECRET),
         "STRAVA_REFRESH_TOKEN": bool(ATHLETE_REFRESH),
         "STRAVA_VERIFY_TOKEN": bool(VERIFY_TOKEN),
+        "SKIP_SIGNATURE": SKIP_SIG_CHECK,
     }
     return jsonify({"ok": True, "env_present": present}), 200
 
 
 @app.get("/last")
 def last_report():
+    if LAST_REPORT:
+        return LAST_REPORT, 200, {"Content-Type": "text/plain; charset=utf-8"}
     try:
         with open("last_activity_report.md", "r", encoding="utf-8") as f:
             return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
